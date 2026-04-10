@@ -1,0 +1,75 @@
+[package]
+name = "alloy-transport-balancer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+description = "Load-balanced, batching RPC transport for alloy with cross-thread domain throttling and HTTP/2 multiplexing"
+license = "MIT"
+keywords = ["alloy", "ethereum", "rpc", "load-balancer", "transport"]
+categories = ["network-programming", "web-programming::http-client"]
+readme = "README.md"
+repository = "https://github.com/KaiCode2/alloy-transport-balancer"
+homepage = "https://github.com/KaiCode2/alloy-transport-balancer"
+
+[features]
+default = ["balancer", "batching"]
+balancer = ["dep:alloy-transport-http", "dep:reqwest"]
+batching = []
+
+[dependencies]
+alloy-json-rpc = "1.0.38"
+alloy-transport = "1.0.38"
+alloy-transport-http = { version = "1.0.38", optional = true }
+reqwest = { version = "0.13", optional = true }
+serde_json = "1.0.145"
+tokio = { version = "1.48.0", features = ["time", "sync", "rt", "rt-multi-thread", "macros"] }
+tower = "0.5"
+tracing = "0.1.41"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros"] }
+
+[[example]]
+name = "basic"
+required-features = ["balancer", "batching"]
+
+[[example]]
+name = "custom_config"
+required-features = ["balancer"]
+
+[[example]]
+name = "observability"
+required-features = ["balancer"]
+
+[[example]]
+name = "batching_only"
+required-features = ["balancer", "batching"]
+
+[[example]]
+name = "multi_chain"
+required-features = ["balancer", "batching"]
+
+[[bench]]
+name = "throughput"
+harness = false
+
+[[bin]]
+name = "chart_data"
+path = "src/bin/chart_data.rs"
+required-features = ["batching"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints.rust]
+missing_docs = "warn"
+rust_2018_idioms = { level = "deny", priority = -1 }
+unused_must_use = "deny"
+unreachable_pub = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+missing_const_for_fn = "warn"
+use_self = "warn"
