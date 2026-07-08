@@ -136,8 +136,11 @@ impl Default for BalancerConfig {
 /// # Example
 ///
 /// ```
-/// use alloy_transport_balancer::{LoadBalancedTransport, Weight, BalancerConfig};
+/// use alloy_transport_balancer::{
+///     BalancerConfig, HttpClientConfig, LoadBalancedTransport, Weight,
+/// };
 /// use reqwest::Url;
+/// use std::time::Duration;
 ///
 /// let transport = LoadBalancedTransport::builder(vec![
 ///     (Url::parse("http://localhost:8545").unwrap(), Weight::default()),
@@ -145,6 +148,11 @@ impl Default for BalancerConfig {
 /// ])
 /// .config(BalancerConfig {
 ///     max_retry_rounds: 5,
+///     ..Default::default()
+/// })
+/// .http_client_config(HttpClientConfig {
+///     request_timeout: Duration::from_secs(10),
+///     gzip: true,
 ///     ..Default::default()
 /// })
 /// .build();

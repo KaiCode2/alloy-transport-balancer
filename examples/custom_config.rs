@@ -36,11 +36,13 @@ fn main() {
         recovery_threshold: 20,
         ..Default::default()
     })
-    // Tighter timeouts for latency-sensitive workloads.
+    // Tighter timeouts for latency-sensitive workloads, and opt into gzip
+    // when providers return large JSON-RPC responses.
     .http_client_config(HttpClientConfig {
         connect_timeout: Duration::from_secs(5),
         request_timeout: Duration::from_secs(10),
         pool_max_idle_per_host: 16,
+        gzip: true,
         ..Default::default()
     })
     .build();

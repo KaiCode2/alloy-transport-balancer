@@ -3,7 +3,8 @@
 //! Maintains a single `reqwest::Client` per domain (e.g., `alchemy.com`),
 //! shared across all transport instances and threads. Each client is configured
 //! for HTTP/2 with adaptive window sizing, connection pooling, TCP keepalive,
-//! and appropriate timeouts.
+//! and appropriate timeouts. Response gzip is opt-in through
+//! [`HttpClientConfig`].
 //!
 //! This reduces the number of TLS handshakes and TCP connections from
 //! `endpoints x threads` to just `domains` for the entire process.
@@ -30,6 +31,9 @@ pub struct HttpClientConfig {
     pub connect_timeout: Duration,
     /// Overall request timeout. Default: 30s.
     pub request_timeout: Duration,
+    /// Request gzip-compressed responses and transparently decompress them.
+    /// Default: false.
+    pub gzip: bool,
 }
 
 impl Default for HttpClientConfig {
@@ -40,6 +44,7 @@ impl Default for HttpClientConfig {
             tcp_keepalive: Duration::from_secs(30),
             connect_timeout: Duration::from_secs(10),
             request_timeout: Duration::from_secs(30),
+            gzip: false,
         }
     }
 }
@@ -82,6 +87,7 @@ pub fn set_default_http_client_config(config: HttpClientConfig) {
 /// - Connection pooling with configurable idle connections and timeouts
 /// - TCP keepalive
 /// - Explicit connect and request timeouts
+/// - Optional gzip response decompression
 ///
 /// All `LoadBalancedTransport` endpoints on the same domain share the same
 /// client, so their requests multiplex over shared TCP connections.
@@ -121,9 +127,9 @@ fn build_optimized_client(config: &HttpClientConfig) -> reqwest::Client {
         // Timeouts: bound how long we wait for a response.
         .connect_timeout(config.connect_timeout)
         .timeout(config.request_timeout)
-        // RPC responses for batched storage/program reads can be large; request
-        // gzip and let reqwest transparently decompress when providers support it.
-        .gzip(true)
+        // Optional compression for large RPC responses. Disabled by default so
+        // consumers choose whether to advertise gzip support to their provider.
+        .gzip(config.gzip)
         .build()
         .expect("failed to build reqwest client")
 }
@@ -178,5 +184,15 @@ mod tests {
         let r = reg.read().unwrap();
         assert!(r.clients.contains_key("concurrent-even.com"));
         assert!(r.clients.contains_key("concurrent-odd.com"));
+    }
+
+    #[test]
+    fn gzip_is_opt_in() {
+        assert!(!HttpClientConfig::default().gzip);
+        let config = HttpClientConfig {
+            gzip: true,
+            ..Default::default()
+        };
+        assert!(config.gzip);
     }
 }

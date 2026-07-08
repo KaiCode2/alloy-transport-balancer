@@ -83,6 +83,7 @@ let transport = LoadBalancedTransport::builder(vec![
 })
 .http_client_config(HttpClientConfig {
     pool_max_idle_per_host: 16,
+    gzip: true,
     ..Default::default()
 })
 .build();
@@ -209,6 +210,7 @@ let avg_delay = weighted_domain_backoff();
 | `tcp_keepalive` | `30s` | TCP keepalive interval |
 | `connect_timeout` | `10s` | TCP connect timeout |
 | `request_timeout` | `30s` | Overall request timeout |
+| `gzip` | `false` | Request gzip-compressed responses and transparently decompress them |
 
 > **Note:** `ThrottleConfig` and `HttpClientConfig` are process-wide defaults set via `set_default_throttle_config()` / `set_default_http_client_config()`. Once a domain is registered, it keeps its config even if the default changes. `BalancerConfig` is per-transport-instance.
 
