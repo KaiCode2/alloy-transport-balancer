@@ -121,6 +121,9 @@ fn build_optimized_client(config: &HttpClientConfig) -> reqwest::Client {
         // Timeouts: bound how long we wait for a response.
         .connect_timeout(config.connect_timeout)
         .timeout(config.request_timeout)
+        // RPC responses for batched storage/program reads can be large; request
+        // gzip and let reqwest transparently decompress when providers support it.
+        .gzip(true)
         .build()
         .expect("failed to build reqwest client")
 }
