@@ -10,7 +10,10 @@ Load-balanced, batching RPC transport for [alloy](https://github.com/alloy-rs/al
 ## Features
 
 - **Weighted round-robin** load balancing across multiple RPC endpoints
-- **Automatic failover** with exponential backoff on 429/502/503/504 errors
+- **Automatic failover** with exponential backoff on 413/429/502/503/504,
+  connection, and timeout errors
+- **Heterogeneous endpoint limits** — route by request-body capability and
+  bound in-flight work independently per provider
 - **Cross-thread domain throttling** — a 429 from any thread causes all threads targeting that domain to back off
 - **HTTP/2 client pooling** — one `reqwest::Client` per domain with connection reuse and multiplexing
 - **Transparent request batching** — concurrent individual requests are automatically grouped into JSON-RPC batch calls
@@ -20,20 +23,24 @@ Load-balanced, batching RPC transport for [alloy](https://github.com/alloy-rs/al
 ## Quick Start
 
 ```rust
-use alloy_transport_balancer::{LoadBalancedTransport, Weight, BalancerConfig};
+use alloy_transport_balancer::{EndpointConfig, LoadBalancedTransport, Weight};
 use reqwest::Url;
-use std::time::Duration;
 
-// Load-balance across multiple RPC providers with weighted routing
-let transport = LoadBalancedTransport::builder(vec![
-    (Url::parse("https://your-primary-rpc.com").unwrap(), Weight(100)),
-    (Url::parse("https://your-fallback-rpc.com").unwrap(), Weight(50)),
+// Keep a smaller fallback in the pool without sending it oversized packets.
+let transport = LoadBalancedTransport::builder_with_endpoints(vec![
+    EndpointConfig::new(
+        Url::parse("https://your-primary-rpc.com").unwrap(),
+        Weight(100),
+    )
+    .with_max_request_bytes(5_000_000)
+    .with_max_in_flight(32),
+    EndpointConfig::new(
+        Url::parse("https://your-fallback-rpc.com").unwrap(),
+        Weight(50),
+    )
+    .with_max_request_bytes(2_400_000)
+    .with_max_in_flight(8),
 ])
-.config(BalancerConfig {
-    max_retry_rounds: 3,
-    heavy_throttle_threshold: Duration::from_millis(500),
-    ..Default::default()
-})
 .build();
 ```
 
@@ -57,6 +64,19 @@ let transport = LoadBalancedTransport::new(vec![
     (Url::parse("https://fallback-provider.com").unwrap(), Weight(10)),   // ~6% of traffic
 ]);
 ```
+
+### Endpoint Capabilities
+
+Use [`EndpointConfig`] when providers have different payload or throughput
+ceilings. The transport serializes each `RequestPacket` once for eligibility,
+skips endpoints whose `max_request_bytes` is too small, and waits on the chosen
+endpoint's `max_in_flight` permit before sending. If every endpoint is too
+small, it returns a local transport error without issuing network I/O.
+
+HTTP `413 Payload Too Large` is retryable so an endpoint whose advertised cap
+was optimistic can fail over to a larger peer. Request gzip is not implied by
+`HttpClientConfig::gzip`: that option negotiates compressed responses, while
+JSON-RPC request bodies still count at their serialized size.
 
 ### Builder Pattern
 
@@ -173,6 +193,19 @@ let avg_delay = weighted_domain_backoff();
 - **Connection reduction**: `endpoints × threads` TCP connections reduced to `domains` connections via HTTP/2 multiplexing and per-domain client pooling
 - **Batch overhead**: Single requests pass through without batching overhead; batching only activates when multiple requests are pending concurrently
 
+## Examples
+
+All examples compile in CI. The live examples use public demonstration RPCs;
+replace them with your own endpoints before measuring production behavior.
+
+| Example | Shows |
+| --- | --- |
+| [`basic`](examples/basic.rs) | Weighted balancing wrapped in transparent batching. |
+| [`custom_config`](examples/custom_config.rs) | Retry, throttle, and HTTP client tuning. |
+| [`batching_only`](examples/batching_only.rs) | Batching over a single HTTP transport. |
+| [`multi_chain`](examples/multi_chain.rs) | Independent balanced transports for multiple chains. |
+| [`observability`](examples/observability.rs) | Domain throttle snapshots and summary logging. |
+
 ## Feature Flags
 
 | Feature | Default | Dependencies Added | Description |
@@ -214,6 +247,15 @@ let avg_delay = weighted_domain_backoff();
 
 > **Note:** `ThrottleConfig` and `HttpClientConfig` are process-wide defaults set via `set_default_throttle_config()` / `set_default_http_client_config()`. Once a domain is registered, it keeps its config even if the default changes. `BalancerConfig` is per-transport-instance.
 
+### `EndpointConfig`
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `url` | required | RPC endpoint URL |
+| `weight` | required | Relative weighted round-robin share |
+| `max_request_bytes` | unrestricted | Largest serialized `RequestPacket` eligible for this endpoint |
+| `max_in_flight` | unrestricted | Per-endpoint semaphore bound; excess work waits without blocking other endpoints |
+
 ### `BatchingConfig`
 
 | Field | Default | Description |
@@ -236,6 +278,7 @@ let avg_delay = weighted_domain_backoff();
 ┌──────────────────────▼──────────────────────────┐
 │ LoadBalancedTransport                            │
 │  Weighted round-robin endpoint selection         │
+│  Request-size eligibility + in-flight gates      │
 │  Retry loop with exponential backoff             │
 │  Skips heavily-throttled endpoints               │
 └──────────────────────┬──────────────────────────┘

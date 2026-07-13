@@ -32,6 +32,7 @@ use client_pool::shared_client_for_domain;
 use reqwest::Url;
 #[cfg(feature = "balancer")]
 use std::{
+    collections::HashMap,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -41,6 +42,8 @@ use std::{
 };
 #[cfg(feature = "balancer")]
 use throttle::record_skip;
+#[cfg(feature = "balancer")]
+use tokio::sync::Semaphore;
 #[cfg(feature = "balancer")]
 use tokio::time::sleep;
 #[cfg(feature = "balancer")]
@@ -82,6 +85,57 @@ impl Default for Weight {
 impl From<u32> for Weight {
     fn from(w: u32) -> Self {
         Self(w)
+    }
+}
+
+/// Per-endpoint routing capabilities.
+///
+/// Request-size and in-flight limits let a heterogeneous provider pool keep a
+/// low-throughput fallback available without sending it work it cannot accept.
+#[derive(Clone, Debug)]
+#[cfg(feature = "balancer")]
+pub struct EndpointConfig {
+    /// RPC URL.
+    pub url: Url,
+    /// Relative traffic weight.
+    pub weight: Weight,
+    /// Maximum serialized JSON-RPC request bytes accepted by this endpoint.
+    /// `None` leaves request size unrestricted.
+    pub max_request_bytes: Option<usize>,
+    /// Maximum simultaneous requests routed to this endpoint. `None` leaves
+    /// concurrency unrestricted.
+    pub max_in_flight: Option<usize>,
+}
+
+#[cfg(feature = "balancer")]
+impl EndpointConfig {
+    /// Construct an endpoint with unrestricted request size and concurrency.
+    pub const fn new(url: Url, weight: Weight) -> Self {
+        Self {
+            url,
+            weight,
+            max_request_bytes: None,
+            max_in_flight: None,
+        }
+    }
+
+    /// Set the largest serialized request this endpoint may receive.
+    pub const fn with_max_request_bytes(mut self, bytes: usize) -> Self {
+        self.max_request_bytes = Some(bytes);
+        self
+    }
+
+    /// Bound simultaneous requests sent to this endpoint.
+    pub const fn with_max_in_flight(mut self, max_in_flight: usize) -> Self {
+        self.max_in_flight = Some(max_in_flight);
+        self
+    }
+}
+
+#[cfg(feature = "balancer")]
+impl From<(Url, Weight)> for EndpointConfig {
+    fn from((url, weight): (Url, Weight)) -> Self {
+        Self::new(url, weight)
     }
 }
 
@@ -159,7 +213,7 @@ impl Default for BalancerConfig {
 /// ```
 #[cfg(feature = "balancer")]
 pub struct LoadBalancedTransportBuilder {
-    endpoints: Vec<(Url, Weight)>,
+    endpoints: Vec<EndpointConfig>,
     config: BalancerConfig,
     throttle_config: Option<ThrottleConfig>,
     http_client_config: Option<HttpClientConfig>,
@@ -210,11 +264,31 @@ impl LoadBalancedTransportBuilder {
         let mut transports = Vec::with_capacity(self.endpoints.len());
         let mut throttles = Vec::with_capacity(self.endpoints.len());
         let mut cumulative = Vec::with_capacity(self.endpoints.len());
-        let mut total = 0u32;
+        let mut total = 0u64;
 
-        for (url, weight) in self.endpoints {
+        let mut request_caps = Vec::with_capacity(self.endpoints.len());
+        let mut in_flight_limits = Vec::with_capacity(self.endpoints.len());
+        let mut throttles_by_domain = HashMap::new();
+
+        for endpoint in self.endpoints {
+            let EndpointConfig {
+                url,
+                weight,
+                max_request_bytes,
+                max_in_flight,
+            } = endpoint;
             assert!(weight.0 > 0, "endpoint weight must be > 0");
-            total += weight.0;
+            assert!(
+                max_request_bytes.is_none_or(|limit| limit > 0),
+                "endpoint max_request_bytes must be > 0 when set"
+            );
+            assert!(
+                max_in_flight.is_none_or(|limit| limit > 0),
+                "endpoint max_in_flight must be > 0 when set"
+            );
+            total = total
+                .checked_add(u64::from(weight.0))
+                .expect("total endpoint weight exceeds u64::MAX");
             cumulative.push(total);
 
             let domain = {
@@ -223,8 +297,13 @@ impl LoadBalancedTransportBuilder {
             };
 
             let client = shared_client_for_domain(&domain);
-            throttles.push(domain_throttle(&domain));
+            let throttle = throttles_by_domain
+                .entry(domain.clone())
+                .or_insert_with(|| domain_throttle(&domain));
+            throttles.push(Arc::clone(throttle));
             transports.push(Http::with_client(client, url));
+            request_caps.push(max_request_bytes);
+            in_flight_limits.push(max_in_flight.map(|limit| Arc::new(Semaphore::new(limit))));
         }
 
         debug!(
@@ -235,6 +314,8 @@ impl LoadBalancedTransportBuilder {
         LoadBalancedTransport {
             endpoints: Arc::new(transports),
             endpoint_throttles: Arc::new(throttles),
+            endpoint_request_caps: Arc::new(request_caps),
+            endpoint_in_flight: Arc::new(in_flight_limits),
             cumulative_weights: Arc::new(cumulative),
             total_weight: total,
             counter: Arc::new(AtomicU64::new(0)),
@@ -257,7 +338,7 @@ impl LoadBalancedTransportBuilder {
 /// **HTTP client sharing**: endpoints on the same domain share a single
 /// `reqwest::Client` configured for HTTP/2 multiplexing and connection pooling.
 ///
-/// When all endpoints fail with retryable errors (429, 502, 503, 504),
+/// When all endpoints fail with retryable errors (413, 429, 502, 503, 504),
 /// the transport retries the full rotation with exponential backoff.
 #[derive(Clone)]
 #[cfg(feature = "balancer")]
@@ -267,10 +348,14 @@ pub struct LoadBalancedTransport {
     /// Per-endpoint domain throttle state. Endpoints on the same domain
     /// share the same `Arc<DomainThrottleState>`.
     endpoint_throttles: Arc<Vec<Arc<DomainThrottleState>>>,
+    /// Optional maximum serialized request bytes per endpoint.
+    endpoint_request_caps: Arc<Vec<Option<usize>>>,
+    /// Optional per-endpoint concurrency gates.
+    endpoint_in_flight: Arc<Vec<Option<Arc<Semaphore>>>>,
     /// Precomputed cumulative weight boundaries for O(log n) weighted selection.
-    cumulative_weights: Arc<Vec<u32>>,
+    cumulative_weights: Arc<Vec<u64>>,
     /// Sum of all endpoint weights.
-    total_weight: u32,
+    total_weight: u64,
     /// Monotonically increasing counter for round-robin distribution.
     counter: Arc<AtomicU64>,
     /// Balancer retry/failover configuration.
@@ -294,7 +379,7 @@ impl LoadBalancedTransport {
     ///
     /// # Errors
     ///
-    /// The transport retries automatically on 429, 502, 503, 504, connection
+    /// The transport retries automatically on 413, 429, 502, 503, 504, connection
     /// failures, and timeouts. Non-retryable errors (400, 401, JSON-RPC errors)
     /// are returned immediately. After `max_retry_rounds` full rotations through
     /// all endpoints, the last retryable error is returned to the caller.
@@ -317,6 +402,11 @@ impl LoadBalancedTransport {
     /// .build();
     /// ```
     pub fn builder(endpoints: Vec<(Url, Weight)>) -> LoadBalancedTransportBuilder {
+        Self::builder_with_endpoints(endpoints.into_iter().map(EndpointConfig::from).collect())
+    }
+
+    /// Create a builder with per-endpoint request and concurrency capabilities.
+    pub fn builder_with_endpoints(endpoints: Vec<EndpointConfig>) -> LoadBalancedTransportBuilder {
         LoadBalancedTransportBuilder {
             endpoints,
             config: BalancerConfig::default(),
@@ -331,8 +421,12 @@ impl LoadBalancedTransport {
     /// binary search for lock-free O(log n) selection.
     fn select_endpoint(&self) -> usize {
         let tick = self.counter.fetch_add(1, Ordering::Relaxed);
-        let bucket = (tick % self.total_weight as u64) as u32;
+        let bucket = tick % self.total_weight;
         self.cumulative_weights.partition_point(|&w| w <= bucket)
+    }
+
+    fn endpoint_accepts_request(&self, index: usize, request_bytes: usize) -> bool {
+        self.endpoint_request_caps[index].is_none_or(|limit| request_bytes <= limit)
     }
 
     /// Returns `true` if the error warrants failover to the next provider.
@@ -343,7 +437,7 @@ impl LoadBalancedTransport {
         if let RpcError::Transport(kind) = err {
             match kind {
                 TransportErrorKind::HttpError(http_err) => {
-                    matches!(http_err.status, 429 | 502 | 503 | 504)
+                    matches!(http_err.status, 413 | 429 | 502 | 503 | 504)
                 }
                 TransportErrorKind::BackendGone => true,
                 TransportErrorKind::Custom(e) => {
@@ -387,6 +481,14 @@ impl Service<RequestPacket> for LoadBalancedTransport {
         let this = self.clone();
         Box::pin(async move {
             let num_endpoints = this.endpoints.len();
+            let request_bytes = serde_json::to_vec(&req)
+                .map(|serialized| serialized.len())
+                .unwrap_or(usize::MAX);
+            if !(0..num_endpoints).any(|idx| this.endpoint_accepts_request(idx, request_bytes)) {
+                return Err(TransportErrorKind::custom_str(
+                    "JSON-RPC request exceeds every configured endpoint size limit",
+                ));
+            }
             let config = &this.config;
             let mut backoff = config.initial_backoff;
 
@@ -406,12 +508,24 @@ impl Service<RequestPacket> for LoadBalancedTransport {
 
                 for attempt in 0..num_endpoints {
                     let idx = (start_idx + attempt) % num_endpoints;
+                    if !this.endpoint_accepts_request(idx, request_bytes) {
+                        continue;
+                    }
 
                     // Cross-thread domain throttle: skip heavily-throttled
                     // endpoints if non-throttled alternatives remain.
                     let throttle = &this.endpoint_throttles[idx];
                     let delay = pre_request_delay(throttle);
-                    if delay >= config.heavy_throttle_threshold && attempt < num_endpoints - 1 {
+                    let has_unthrottled_eligible_alternative =
+                        ((attempt + 1)..num_endpoints).any(|next_attempt| {
+                            let next_idx = (start_idx + next_attempt) % num_endpoints;
+                            this.endpoint_accepts_request(next_idx, request_bytes)
+                                && pre_request_delay(&this.endpoint_throttles[next_idx])
+                                    < config.heavy_throttle_threshold
+                        });
+                    if delay >= config.heavy_throttle_threshold
+                        && has_unthrottled_eligible_alternative
+                    {
                         record_skip(throttle);
                         continue;
                     }
@@ -421,6 +535,15 @@ impl Service<RequestPacket> for LoadBalancedTransport {
                         sleep(delay).await;
                     }
 
+                    let _permit = match &this.endpoint_in_flight[idx] {
+                        Some(limit) => Some(
+                            Arc::clone(limit)
+                                .acquire_owned()
+                                .await
+                                .map_err(|_| TransportErrorKind::backend_gone())?,
+                        ),
+                        None => None,
+                    };
                     let mut transport = this.endpoints[idx].clone();
 
                     match transport.call(req.clone()).await {
@@ -482,6 +605,31 @@ impl std::fmt::Debug for LoadBalancedTransport {
 #[cfg(all(test, feature = "balancer"))]
 mod tests {
     use super::*;
+    use alloy_json_rpc::Id;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+    };
+
+    fn one_shot_http_server(
+        status: &'static str,
+        body: &'static str,
+    ) -> (Url, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 8 * 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        (Url::parse(&format!("http://{address}")).unwrap(), handle)
+    }
 
     fn test_transport(weights: &[u32]) -> LoadBalancedTransport {
         let endpoints: Vec<(Url, Weight)> = weights
@@ -495,6 +643,14 @@ mod tests {
             })
             .collect();
         LoadBalancedTransport::new(endpoints)
+    }
+
+    #[test]
+    fn builder_supports_total_weights_above_u32_max() {
+        let transport = test_transport(&[u32::MAX, u32::MAX]);
+
+        assert_eq!(transport.endpoints.len(), 2);
+        assert_eq!(transport.total_weight as u128, u128::from(u32::MAX) * 2);
     }
 
     #[test]
@@ -617,6 +773,72 @@ mod tests {
     fn not_retryable_400() {
         let err = TransportErrorKind::http_error(400, "bad request".into());
         assert!(!LoadBalancedTransport::is_retryable(&err));
+    }
+
+    #[test]
+    fn retryable_413_can_fail_over_to_a_larger_endpoint() {
+        let err = TransportErrorKind::http_error(413, "payload too large".into());
+        assert!(LoadBalancedTransport::is_retryable(&err));
+    }
+
+    #[test]
+    fn endpoint_request_caps_gate_eligibility() {
+        let transport = LoadBalancedTransport::builder_with_endpoints(vec![
+            EndpointConfig::new(Url::parse("http://small.example.com").unwrap(), Weight(25))
+                .with_max_request_bytes(1_000),
+            EndpointConfig::new(Url::parse("http://large.example.com").unwrap(), Weight(100))
+                .with_max_request_bytes(5_000),
+        ])
+        .build();
+
+        assert!(!transport.endpoint_accepts_request(0, 2_000));
+        assert!(transport.endpoint_accepts_request(1, 2_000));
+    }
+
+    #[tokio::test]
+    async fn heavily_throttled_final_eligible_endpoint_is_still_attempted() {
+        let mut transport = LoadBalancedTransport::builder_with_endpoints(vec![
+            EndpointConfig::new(Url::parse("http://127.0.0.1:1").unwrap(), Weight(1)),
+            EndpointConfig::new(Url::parse("http://127.0.0.1:2").unwrap(), Weight(1))
+                .with_max_request_bytes(1),
+        ])
+        .config(BalancerConfig {
+            max_retry_rounds: 0,
+            heavy_throttle_threshold: Duration::ZERO,
+            ..Default::default()
+        })
+        .build();
+        let request = alloy_json_rpc::Request::new("eth_blockNumber".to_owned(), Id::Number(1), ());
+
+        let result = transport
+            .call(RequestPacket::Single(request.serialize().unwrap()))
+            .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn payload_too_large_response_fails_over_to_next_endpoint() {
+        let (small_url, small_server) = one_shot_http_server("413 Payload Too Large", "");
+        let (large_url, large_server) =
+            one_shot_http_server("200 OK", r#"{"jsonrpc":"2.0","id":2,"result":"0x1"}"#);
+        let mut transport =
+            LoadBalancedTransport::builder(vec![(small_url, Weight(1)), (large_url, Weight(1))])
+                .config(BalancerConfig {
+                    max_retry_rounds: 0,
+                    ..Default::default()
+                })
+                .build();
+        let request = alloy_json_rpc::Request::new("eth_blockNumber".to_owned(), Id::Number(2), ());
+
+        let response = transport
+            .call(RequestPacket::Single(request.serialize().unwrap()))
+            .await
+            .unwrap();
+
+        assert!(matches!(response, ResponsePacket::Single(_)));
+        small_server.join().unwrap();
+        large_server.join().unwrap();
     }
 
     #[test]

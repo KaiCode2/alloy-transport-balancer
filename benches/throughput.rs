@@ -21,6 +21,7 @@ use tower::Service;
 struct MockRpcTransport {
     latency: Duration,
     call_count: Arc<AtomicUsize>,
+    concurrency_limit: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl MockRpcTransport {
@@ -28,6 +29,15 @@ impl MockRpcTransport {
         Self {
             latency,
             call_count: Arc::new(AtomicUsize::new(0)),
+            concurrency_limit: None,
+        }
+    }
+
+    fn with_pool_limit(latency: Duration, max_concurrent: usize) -> Self {
+        Self {
+            latency,
+            call_count: Arc::new(AtomicUsize::new(0)),
+            concurrency_limit: Some(Arc::new(tokio::sync::Semaphore::new(max_concurrent))),
         }
     }
 }
@@ -44,8 +54,13 @@ impl Service<RequestPacket> for MockRpcTransport {
     fn call(&mut self, req: RequestPacket) -> Self::Future {
         let latency = self.latency;
         self.call_count.fetch_add(1, Ordering::Relaxed);
+        let concurrency_limit = self.concurrency_limit.clone();
 
         Box::pin(async move {
+            let _permit = match concurrency_limit {
+                Some(limit) => Some(limit.acquire_owned().await.expect("semaphore stays open")),
+                None => None,
+            };
             tokio::time::sleep(latency).await;
 
             let value = RawValue::from_string("\"0x1\"".to_string()).unwrap();
@@ -110,12 +125,13 @@ fn throughput_benchmark(c: &mut Criterion) {
         group.sample_size(20);
         group.measurement_time(Duration::from_secs(5));
 
-        // Vanilla: single mock transport, no batching
+        // Vanilla: six simulated HTTP connections, matching the documented
+        // chart-data baseline.
         group.bench_with_input(
             BenchmarkId::new("vanilla", concurrency),
             &concurrency,
             |b, &n| {
-                let transport = MockRpcTransport::new(latency);
+                let transport = MockRpcTransport::with_pool_limit(latency, 6);
                 b.to_async(&rt)
                     .iter(|| fire_concurrent(transport.clone(), n as usize));
             },
@@ -154,12 +170,13 @@ fn latency_benchmark(c: &mut Criterion) {
         group.sample_size(20);
         group.measurement_time(Duration::from_secs(5));
 
-        // Vanilla: measure mean per-request latency
+        // Vanilla: measure wall-clock latency through the documented
+        // six-connection baseline.
         group.bench_with_input(
             BenchmarkId::new("vanilla", concurrency),
             &concurrency,
             |b, &n| {
-                let transport = MockRpcTransport::new(latency);
+                let transport = MockRpcTransport::with_pool_limit(latency, 6);
                 b.to_async(&rt).iter(|| {
                     let t = transport.clone();
                     async move {

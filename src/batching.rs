@@ -129,6 +129,10 @@ impl BatchingTransport {
     /// pending requests in that batch receive the same error. If responses
     /// are missing after all retry rounds, affected requests receive a
     /// `"missing response in batch"` error.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `config.max_batch_size` is zero.
     pub fn new<T>(inner: T, config: BatchingConfig) -> Self
     where
         T: Service<RequestPacket, Response = ResponsePacket, Error = TransportError>
@@ -138,6 +142,10 @@ impl BatchingTransport {
             + 'static,
         T::Future: Send,
     {
+        assert!(
+            config.max_batch_size > 0,
+            "max_batch_size must be greater than zero"
+        );
         let shared = Arc::new(BatchingShared {
             pending: Mutex::new(Vec::with_capacity(config.max_batch_size)),
             notify: Notify::new(),
@@ -459,6 +467,18 @@ mod tests {
                 batch_sizes: Arc::new(Mutex::new(Vec::new())),
             }
         }
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "max_batch_size must be greater than zero")]
+    async fn rejects_zero_max_batch_size() {
+        let _ = BatchingTransport::new(
+            MockTransport::new(),
+            BatchingConfig {
+                max_batch_size: 0,
+                ..Default::default()
+            },
+        );
     }
 
     impl Service<RequestPacket> for MockTransport {
@@ -877,7 +897,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let calls = call_count.load(Ordering::Relaxed);
         assert!(
-            calls >= n + 1,
+            calls > n,
             "expected at least {} calls (1 rejected batch + {} individual), got {}",
             n + 1,
             n,

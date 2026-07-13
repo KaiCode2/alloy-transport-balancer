@@ -1,6 +1,6 @@
 [package]
 name = "alloy-transport-balancer"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Load-balanced, batching RPC transport for alloy with cross-thread domain throttling and HTTP/2 multiplexing"

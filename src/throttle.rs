@@ -511,10 +511,15 @@ pub fn record_batch_rejection(state: &DomainThrottleState) {
 
 /// Reset all throttle state (for testing).
 #[cfg(test)]
-pub(crate) fn reset_registry() {
+pub(crate) fn reset_registry() -> std::sync::MutexGuard<'static, ()> {
+    static TEST_REGISTRY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = TEST_REGISTRY_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let reg = registry();
     let mut r = reg.write().unwrap_or_else(|e| e.into_inner());
     r.domains.clear();
+    guard
 }
 
 #[cfg(test)]
@@ -564,7 +569,7 @@ mod tests {
 
     #[test]
     fn backoff_escalation() {
-        reset_registry();
+        let _registry = reset_registry();
         let state = domain_throttle("test-escalation.com");
 
         assert_eq!(pre_request_delay(&state), Duration::ZERO);
@@ -587,7 +592,7 @@ mod tests {
 
     #[test]
     fn backoff_caps_at_max() {
-        reset_registry();
+        let _registry = reset_registry();
         let state = domain_throttle("test-cap.com");
 
         for _ in 0..20 {
@@ -602,7 +607,7 @@ mod tests {
 
     #[test]
     fn recovery_after_consecutive_successes() {
-        reset_registry();
+        let _registry = reset_registry();
         let state = domain_throttle("test-recovery.com");
 
         // Escalate to level 2
@@ -631,7 +636,7 @@ mod tests {
 
     #[test]
     fn rate_limit_resets_success_counter() {
-        reset_registry();
+        let _registry = reset_registry();
         let state = domain_throttle("test-reset.com");
 
         record_rate_limit(&state);
@@ -653,7 +658,7 @@ mod tests {
 
     #[test]
     fn success_at_level_zero_is_noop() {
-        reset_registry();
+        let _registry = reset_registry();
         let state = domain_throttle("test-noop.com");
 
         // Many successes at level 0 should not underflow or cause issues
@@ -665,7 +670,7 @@ mod tests {
 
     #[test]
     fn shared_state_across_lookups() {
-        reset_registry();
+        let _registry = reset_registry();
         let a = domain_throttle("shared-test.com");
         let b = domain_throttle("shared-test.com");
 
@@ -675,7 +680,7 @@ mod tests {
 
     #[test]
     fn different_domains_are_independent() {
-        reset_registry();
+        let _registry = reset_registry();
         let a = domain_throttle("domain-a.com");
         let b = domain_throttle("domain-b.com");
 
@@ -686,7 +691,7 @@ mod tests {
 
     #[test]
     fn batch_rejection_escalates_by_one() {
-        reset_registry();
+        let _registry = reset_registry();
         let state = domain_throttle("test-batch-rejection.com");
 
         assert_eq!(pre_request_delay(&state), Duration::ZERO);
@@ -716,7 +721,7 @@ mod tests {
 
     #[test]
     fn time_based_decay_drops_levels() {
-        reset_registry();
+        let _registry = reset_registry();
         let state = domain_throttle("test-time-decay.com");
 
         // Escalate to level 3
@@ -737,7 +742,7 @@ mod tests {
 
     #[test]
     fn time_based_decay_fully_recovers() {
-        reset_registry();
+        let _registry = reset_registry();
         let state = domain_throttle("test-full-decay.com");
 
         // Escalate to level 4
@@ -758,7 +763,7 @@ mod tests {
 
     #[test]
     fn weighted_domain_backoff_dilutes_sick_domain() {
-        reset_registry();
+        let _registry = reset_registry();
 
         // Healthy high-traffic domain
         let healthy = domain_throttle("healthy-weighted.com");
@@ -792,7 +797,7 @@ mod tests {
 
     #[test]
     fn custom_throttle_config() {
-        reset_registry();
+        let _registry = reset_registry();
         set_default_throttle_config(ThrottleConfig {
             max_backoff_level: 3,
             recovery_threshold: 2,
@@ -829,7 +834,7 @@ mod tests {
 
     #[test]
     fn cross_thread_visibility() {
-        reset_registry();
+        let _registry = reset_registry();
         let state = domain_throttle("cross-thread.com");
 
         let handles: Vec<_> = (0..4)
