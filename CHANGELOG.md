@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0-alpha.1] - 2026-07-28
+
+### Added
+
+- Added stable, non-secret endpoint identities and provider provenance for
+  source-aware follow-up reads.
+- Added a single `flashblocks` endpoint marker plus pinned endpoint leases for
+  chain-specific preconfirmation subscribers.
+- Added balanced, preferred, and required endpoint routing policies. Preferred
+  routing tries the announcing provider first while retaining ordinary retry
+  and failover; required routing stays pinned.
+
+### Changed
+
+- Provider selection now validates duplicate identities and rejects a
+  Flashblocks-capable endpoint without an identity.
+- Transport diagnostics identify providers by configured ID without exposing
+  credential-bearing endpoint URLs.
+
 ## [0.2.0] - 2026-07-14
 
 ### Added
@@ -65,7 +84,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Weight` newtype for type-safe endpoint weighting (default: 100)
 - `balancer` and `batching` feature flags for selective compilation
 
-[Unreleased]: https://github.com/KaiCode2/alloy-transport-balancer/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/KaiCode2/alloy-transport-balancer/compare/v0.3.0-alpha.1...HEAD
+[0.3.0-alpha.1]: https://github.com/KaiCode2/alloy-transport-balancer/compare/v0.2.0...v0.3.0-alpha.1
 [0.2.0]: https://github.com/KaiCode2/alloy-transport-balancer/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/KaiCode2/alloy-transport-balancer/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/KaiCode2/alloy-transport-balancer/compare/v0.1.0...v0.1.1

@@ -30,6 +30,7 @@ use alloy_transport_http::Http;
 use client_pool::shared_client_for_domain;
 #[cfg(feature = "balancer")]
 use reqwest::Url;
+use std::fmt;
 #[cfg(feature = "balancer")]
 use std::{
     collections::HashMap,
@@ -50,6 +51,103 @@ use tokio::time::sleep;
 use tower::Service;
 #[cfg(feature = "balancer")]
 use tracing::{debug, warn};
+
+/// Stable, non-secret identity for one configured RPC provider endpoint.
+///
+/// Endpoint identities let callers route follow-up reads back to the provider
+/// that announced a block or event. They should be short operator-defined
+/// labels such as `quicknode` or `alchemy`, never URLs or credentials.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+pub struct EndpointId(String);
+
+impl EndpointId {
+    /// Construct a non-empty endpoint identity.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `value` is empty or contains leading/trailing whitespace.
+    pub fn new(value: impl Into<String>) -> Self {
+        let value = value.into();
+        assert!(!value.is_empty(), "endpoint id must not be empty");
+        assert_eq!(
+            value.trim(),
+            value,
+            "endpoint id must not contain outer whitespace"
+        );
+        Self(value)
+    }
+
+    /// Borrow the configured identity.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for EndpointId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("EndpointId").field(&self.as_str()).finish()
+    }
+}
+
+impl fmt::Display for EndpointId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<&str> for EndpointId {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for EndpointId {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
+/// Scoped endpoint ordering for a cloned transport handle.
+///
+/// Routing policy is deliberately local to the handle. An event consumer can
+/// prefer or pin its announcing provider without changing the ordering used by
+/// unrelated requests sharing the same underlying connection pools.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg(feature = "balancer")]
+pub enum RoutePolicy {
+    /// Use normal weighted selection and cross-provider failover.
+    #[default]
+    Balanced,
+    /// Try the named endpoint first, then permit normal failover.
+    Prefer(EndpointId),
+    /// Send every attempt to the named endpoint and never fail over.
+    Require(EndpointId),
+}
+
+/// Error returned when a requested endpoint route cannot be constructed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg(feature = "balancer")]
+pub enum EndpointRouteError {
+    /// No configured endpoint has the requested identity.
+    UnknownEndpoint(EndpointId),
+    /// The endpoint exists but was not marked as Flashblocks-capable.
+    FlashblocksUnsupported(EndpointId),
+}
+
+#[cfg(feature = "balancer")]
+impl fmt::Display for EndpointRouteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownEndpoint(id) => write!(f, "unknown RPC endpoint id {id}"),
+            Self::FlashblocksUnsupported(id) => {
+                write!(f, "RPC endpoint {id} is not configured for Flashblocks")
+            }
+        }
+    }
+}
+
+#[cfg(feature = "balancer")]
+impl std::error::Error for EndpointRouteError {}
 
 /// Relative weight for an endpoint in the load balancer.
 ///
@@ -95,6 +193,8 @@ impl From<u32> for Weight {
 #[derive(Clone, Debug)]
 #[cfg(feature = "balancer")]
 pub struct EndpointConfig {
+    /// Stable provider identity used for source-aware follow-up routing.
+    pub id: Option<EndpointId>,
     /// RPC URL.
     pub url: Url,
     /// Relative traffic weight.
@@ -105,6 +205,9 @@ pub struct EndpointConfig {
     /// Maximum simultaneous requests routed to this endpoint. `None` leaves
     /// concurrency unrestricted.
     pub max_in_flight: Option<usize>,
+    /// Whether this provider pair is expected to expose a complete Flashblocks
+    /// feed and matching preconfirmed state.
+    pub flashblocks: bool,
 }
 
 #[cfg(feature = "balancer")]
@@ -112,11 +215,25 @@ impl EndpointConfig {
     /// Construct an endpoint with unrestricted request size and concurrency.
     pub const fn new(url: Url, weight: Weight) -> Self {
         Self {
+            id: None,
             url,
             weight,
             max_request_bytes: None,
             max_in_flight: None,
+            flashblocks: false,
         }
+    }
+
+    /// Attach a stable provider identity for source-aware routing.
+    pub fn with_id(mut self, id: impl Into<EndpointId>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
+    /// Mark whether the provider pair supports Flashblocks.
+    pub const fn with_flashblocks(mut self, supported: bool) -> Self {
+        self.flashblocks = supported;
+        self
     }
 
     /// Set the largest serialized request this endpoint may receive.
@@ -268,14 +385,19 @@ impl LoadBalancedTransportBuilder {
 
         let mut request_caps = Vec::with_capacity(self.endpoints.len());
         let mut in_flight_limits = Vec::with_capacity(self.endpoints.len());
+        let mut endpoint_ids = Vec::with_capacity(self.endpoints.len());
+        let mut endpoint_flashblocks = Vec::with_capacity(self.endpoints.len());
+        let mut endpoint_index_by_id = HashMap::new();
         let mut throttles_by_domain = HashMap::new();
 
         for endpoint in self.endpoints {
             let EndpointConfig {
+                id,
                 url,
                 weight,
                 max_request_bytes,
                 max_in_flight,
+                flashblocks,
             } = endpoint;
             assert!(weight.0 > 0, "endpoint weight must be > 0");
             assert!(
@@ -286,6 +408,18 @@ impl LoadBalancedTransportBuilder {
                 max_in_flight.is_none_or(|limit| limit > 0),
                 "endpoint max_in_flight must be > 0 when set"
             );
+            assert!(
+                !flashblocks || id.is_some(),
+                "Flashblocks endpoints must have an endpoint id"
+            );
+            if let Some(id) = &id {
+                assert!(
+                    endpoint_index_by_id
+                        .insert(id.clone(), transports.len())
+                        .is_none(),
+                    "duplicate endpoint id {id}"
+                );
+            }
             total = total
                 .checked_add(u64::from(weight.0))
                 .expect("total endpoint weight exceeds u64::MAX");
@@ -304,6 +438,8 @@ impl LoadBalancedTransportBuilder {
             transports.push(Http::with_client(client, url));
             request_caps.push(max_request_bytes);
             in_flight_limits.push(max_in_flight.map(|limit| Arc::new(Semaphore::new(limit))));
+            endpoint_ids.push(id);
+            endpoint_flashblocks.push(flashblocks);
         }
 
         debug!(
@@ -316,10 +452,14 @@ impl LoadBalancedTransportBuilder {
             endpoint_throttles: Arc::new(throttles),
             endpoint_request_caps: Arc::new(request_caps),
             endpoint_in_flight: Arc::new(in_flight_limits),
+            endpoint_ids: Arc::new(endpoint_ids),
+            endpoint_flashblocks: Arc::new(endpoint_flashblocks),
+            endpoint_index_by_id: Arc::new(endpoint_index_by_id),
             cumulative_weights: Arc::new(cumulative),
             total_weight: total,
             counter: Arc::new(AtomicU64::new(0)),
             config: Arc::new(self.config),
+            route_policy: RoutePolicy::Balanced,
         }
     }
 }
@@ -352,6 +492,12 @@ pub struct LoadBalancedTransport {
     endpoint_request_caps: Arc<Vec<Option<usize>>>,
     /// Optional per-endpoint concurrency gates.
     endpoint_in_flight: Arc<Vec<Option<Arc<Semaphore>>>>,
+    /// Stable operator identities, when configured.
+    endpoint_ids: Arc<Vec<Option<EndpointId>>>,
+    /// Provider-level Flashblocks declarations.
+    endpoint_flashblocks: Arc<Vec<bool>>,
+    /// Endpoint lookup by stable identity.
+    endpoint_index_by_id: Arc<HashMap<EndpointId, usize>>,
     /// Precomputed cumulative weight boundaries for O(log n) weighted selection.
     cumulative_weights: Arc<Vec<u64>>,
     /// Sum of all endpoint weights.
@@ -360,6 +506,41 @@ pub struct LoadBalancedTransport {
     counter: Arc<AtomicU64>,
     /// Balancer retry/failover configuration.
     config: Arc<BalancerConfig>,
+    /// Ordering policy scoped to this transport clone.
+    route_policy: RoutePolicy,
+}
+
+/// A pinned Flashblocks-capable transport and its provider identity.
+///
+/// The lease shares connection pools and throttle state with the parent
+/// balancer, but its transport never fails over to another endpoint.
+#[derive(Clone)]
+#[cfg(feature = "balancer")]
+pub struct EndpointLease {
+    endpoint_id: EndpointId,
+    transport: LoadBalancedTransport,
+}
+
+#[cfg(feature = "balancer")]
+impl EndpointLease {
+    /// Provider pinned by this lease.
+    pub const fn endpoint_id(&self) -> &EndpointId {
+        &self.endpoint_id
+    }
+
+    /// Clone the pinned Alloy transport.
+    pub fn transport(&self) -> LoadBalancedTransport {
+        self.transport.clone()
+    }
+}
+
+#[cfg(feature = "balancer")]
+impl fmt::Debug for EndpointLease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EndpointLease")
+            .field("endpoint_id", &self.endpoint_id)
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(feature = "balancer")]
@@ -415,6 +596,62 @@ impl LoadBalancedTransport {
         }
     }
 
+    /// Return the routing policy scoped to this transport handle.
+    pub const fn route_policy(&self) -> &RoutePolicy {
+        &self.route_policy
+    }
+
+    /// Whether the named endpoint is configured for Flashblocks.
+    pub fn endpoint_supports_flashblocks(&self, id: &EndpointId) -> bool {
+        self.endpoint_index_by_id
+            .get(id)
+            .is_some_and(|&index| self.endpoint_flashblocks[index])
+    }
+
+    /// Clone this transport with source-first routing for canonical follow-up
+    /// reads. Retryable failures may still use another configured endpoint.
+    pub fn prefer_endpoint(&self, id: impl Into<EndpointId>) -> Result<Self, EndpointRouteError> {
+        self.with_route_policy(RoutePolicy::Prefer(id.into()))
+    }
+
+    /// Create a pinned lease for Flashblocks and preconfirmed-state reads.
+    ///
+    /// The endpoint must exist and be explicitly marked with
+    /// [`EndpointConfig::with_flashblocks`]. The returned transport retries the
+    /// same endpoint but never crosses into another provider's pending cache.
+    pub fn flashblocks_lease(
+        &self,
+        id: impl Into<EndpointId>,
+    ) -> Result<EndpointLease, EndpointRouteError> {
+        let id = id.into();
+        if !self.endpoint_index_by_id.contains_key(&id) {
+            return Err(EndpointRouteError::UnknownEndpoint(id));
+        }
+        if !self.endpoint_supports_flashblocks(&id) {
+            return Err(EndpointRouteError::FlashblocksUnsupported(id));
+        }
+        let transport = self.with_route_policy(RoutePolicy::Require(id.clone()))?;
+        Ok(EndpointLease {
+            endpoint_id: id,
+            transport,
+        })
+    }
+
+    fn with_route_policy(&self, route_policy: RoutePolicy) -> Result<Self, EndpointRouteError> {
+        let id = match &route_policy {
+            RoutePolicy::Balanced => None,
+            RoutePolicy::Prefer(id) | RoutePolicy::Require(id) => Some(id),
+        };
+        if let Some(id) = id
+            && !self.endpoint_index_by_id.contains_key(id)
+        {
+            return Err(EndpointRouteError::UnknownEndpoint(id.clone()));
+        }
+        let mut routed = self.clone();
+        routed.route_policy = route_policy;
+        Ok(routed)
+    }
+
     /// Select an endpoint index using weighted round-robin.
     ///
     /// Uses an atomic counter mapped into cumulative weight buckets via
@@ -427,6 +664,41 @@ impl LoadBalancedTransport {
 
     fn endpoint_accepts_request(&self, index: usize, request_bytes: usize) -> bool {
         self.endpoint_request_caps[index].is_none_or(|limit| request_bytes <= limit)
+    }
+
+    fn candidate_indices(&self, request_bytes: usize) -> Vec<usize> {
+        let mut candidates = Vec::with_capacity(self.endpoints.len());
+        match &self.route_policy {
+            RoutePolicy::Balanced => {
+                let start = self.select_endpoint();
+                for attempt in 0..self.endpoints.len() {
+                    let index = (start + attempt) % self.endpoints.len();
+                    if self.endpoint_accepts_request(index, request_bytes) {
+                        candidates.push(index);
+                    }
+                }
+            }
+            RoutePolicy::Prefer(id) => {
+                let preferred = self.endpoint_index_by_id[id];
+                if self.endpoint_accepts_request(preferred, request_bytes) {
+                    candidates.push(preferred);
+                }
+                let start = self.select_endpoint();
+                for attempt in 0..self.endpoints.len() {
+                    let index = (start + attempt) % self.endpoints.len();
+                    if index != preferred && self.endpoint_accepts_request(index, request_bytes) {
+                        candidates.push(index);
+                    }
+                }
+            }
+            RoutePolicy::Require(id) => {
+                let required = self.endpoint_index_by_id[id];
+                if self.endpoint_accepts_request(required, request_bytes) {
+                    candidates.push(required);
+                }
+            }
+        }
+        candidates
     }
 
     /// Returns `true` if the error warrants failover to the next provider.
@@ -480,13 +752,13 @@ impl Service<RequestPacket> for LoadBalancedTransport {
     fn call(&mut self, req: RequestPacket) -> Self::Future {
         let this = self.clone();
         Box::pin(async move {
-            let num_endpoints = this.endpoints.len();
             let request_bytes = serde_json::to_vec(&req)
                 .map(|serialized| serialized.len())
                 .unwrap_or(usize::MAX);
-            if !(0..num_endpoints).any(|idx| this.endpoint_accepts_request(idx, request_bytes)) {
+            let mut candidates = this.candidate_indices(request_bytes);
+            if candidates.is_empty() {
                 return Err(TransportErrorKind::custom_str(
-                    "JSON-RPC request exceeds every configured endpoint size limit",
+                    "JSON-RPC request exceeds every endpoint allowed by the routing policy",
                 ));
             }
             let config = &this.config;
@@ -501,29 +773,25 @@ impl Service<RequestPacket> for LoadBalancedTransport {
                     );
                     sleep(backoff).await;
                     backoff = (backoff * 2).min(config.max_backoff);
+                    candidates = this.candidate_indices(request_bytes);
                 }
 
-                let start_idx = this.select_endpoint();
                 let mut last_err: Option<TransportError> = None;
 
-                for attempt in 0..num_endpoints {
-                    let idx = (start_idx + attempt) % num_endpoints;
-                    if !this.endpoint_accepts_request(idx, request_bytes) {
-                        continue;
-                    }
-
+                for (attempt, &idx) in candidates.iter().enumerate() {
                     // Cross-thread domain throttle: skip heavily-throttled
                     // endpoints if non-throttled alternatives remain.
                     let throttle = &this.endpoint_throttles[idx];
                     let delay = pre_request_delay(throttle);
                     let has_unthrottled_eligible_alternative =
-                        ((attempt + 1)..num_endpoints).any(|next_attempt| {
-                            let next_idx = (start_idx + next_attempt) % num_endpoints;
-                            this.endpoint_accepts_request(next_idx, request_bytes)
-                                && pre_request_delay(&this.endpoint_throttles[next_idx])
-                                    < config.heavy_throttle_threshold
+                        candidates[(attempt + 1)..].iter().any(|&next_idx| {
+                            pre_request_delay(&this.endpoint_throttles[next_idx])
+                                < config.heavy_throttle_threshold
                         });
-                    if delay >= config.heavy_throttle_threshold
+                    let is_preferred_source =
+                        attempt == 0 && matches!(&this.route_policy, RoutePolicy::Prefer(_));
+                    if !is_preferred_source
+                        && delay >= config.heavy_throttle_threshold
                         && has_unthrottled_eligible_alternative
                     {
                         record_skip(throttle);
@@ -565,7 +833,9 @@ impl Service<RequestPacket> for LoadBalancedTransport {
                             }
 
                             warn!(
-                                url = transport.url(),
+                                endpoint_id = this.endpoint_ids[idx]
+                                    .as_ref()
+                                    .map_or("<anonymous>", EndpointId::as_str),
                                 endpoint_attempt = attempt + 1,
                                 round,
                                 rate_limited,
@@ -574,7 +844,7 @@ impl Service<RequestPacket> for LoadBalancedTransport {
 
                             last_err = Some(err);
 
-                            if rate_limited && attempt < num_endpoints - 1 {
+                            if rate_limited && attempt + 1 < candidates.len() {
                                 sleep(config.rate_limit_failover_delay).await;
                             }
                         }
@@ -598,6 +868,7 @@ impl std::fmt::Debug for LoadBalancedTransport {
         f.debug_struct("LoadBalancedTransport")
             .field("endpoints", &self.endpoints.len())
             .field("total_weight", &self.total_weight)
+            .field("route_policy", &self.route_policy)
             .finish()
     }
 }
@@ -643,6 +914,19 @@ mod tests {
             })
             .collect();
         LoadBalancedTransport::new(endpoints)
+    }
+
+    fn identified_transport() -> LoadBalancedTransport {
+        LoadBalancedTransport::builder_with_endpoints(vec![
+            EndpointConfig::new(Url::parse("http://a.example.com").unwrap(), Weight(1))
+                .with_id("a"),
+            EndpointConfig::new(Url::parse("http://b.example.com").unwrap(), Weight(1))
+                .with_id("b")
+                .with_flashblocks(true),
+            EndpointConfig::new(Url::parse("http://c.example.com").unwrap(), Weight(1))
+                .with_id("c"),
+        ])
+        .build()
     }
 
     #[test]
@@ -743,6 +1027,73 @@ mod tests {
         .config(config)
         .build();
         assert_eq!(transport.config.max_retry_rounds, 5);
+    }
+
+    #[test]
+    fn preferred_route_orders_source_first_without_changing_parent() {
+        let transport = identified_transport();
+        transport.counter.store(2, Ordering::Relaxed);
+
+        let preferred = transport.prefer_endpoint("b").unwrap();
+        let candidates = preferred.candidate_indices(1);
+
+        assert_eq!(candidates.first(), Some(&1));
+        assert_eq!(candidates.len(), 3);
+        assert!(matches!(transport.route_policy(), RoutePolicy::Balanced));
+        assert!(matches!(
+            preferred.route_policy(),
+            RoutePolicy::Prefer(id) if id.as_str() == "b"
+        ));
+    }
+
+    #[test]
+    fn flashblocks_lease_is_pinned_to_one_declared_endpoint() {
+        let transport = identified_transport();
+        let lease = transport.flashblocks_lease("b").unwrap();
+        let pinned = lease.transport();
+
+        assert_eq!(lease.endpoint_id().as_str(), "b");
+        assert_eq!(pinned.candidate_indices(1), vec![1]);
+        assert!(matches!(
+            pinned.route_policy(),
+            RoutePolicy::Require(id) if id.as_str() == "b"
+        ));
+    }
+
+    #[test]
+    fn flashblocks_lease_rejects_undeclared_endpoint_support() {
+        let transport = identified_transport();
+
+        assert_eq!(
+            transport.flashblocks_lease("a").unwrap_err(),
+            EndpointRouteError::FlashblocksUnsupported(EndpointId::from("a"))
+        );
+        assert_eq!(
+            transport.flashblocks_lease("missing").unwrap_err(),
+            EndpointRouteError::UnknownEndpoint(EndpointId::from("missing"))
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Flashblocks endpoints must have an endpoint id")]
+    fn flashblocks_endpoint_requires_identity() {
+        LoadBalancedTransport::builder_with_endpoints(vec![
+            EndpointConfig::new(Url::parse("http://a.example.com").unwrap(), Weight(1))
+                .with_flashblocks(true),
+        ])
+        .build();
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate endpoint id a")]
+    fn duplicate_endpoint_identity_is_rejected() {
+        LoadBalancedTransport::builder_with_endpoints(vec![
+            EndpointConfig::new(Url::parse("http://a.example.com").unwrap(), Weight(1))
+                .with_id("a"),
+            EndpointConfig::new(Url::parse("http://b.example.com").unwrap(), Weight(1))
+                .with_id("a"),
+        ])
+        .build();
     }
 
     #[test]

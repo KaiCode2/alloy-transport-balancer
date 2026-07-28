@@ -1,6 +1,6 @@
 [package]
 name = "alloy-transport-balancer"
-version = "0.2.0"
+version = "0.3.0-alpha.1"
 edition = "2024"
 rust-version = "1.88"
 description = "Load-balanced, batching RPC transport for alloy with cross-thread domain throttling and HTTP/2 multiplexing"
@@ -21,6 +21,7 @@ alloy-json-rpc = ">=1.0.38, <1.7"
 alloy-transport = ">=1.0.38, <1.7"
 alloy-transport-http = { version = ">=1.0.38, <1.7", optional = true }
 reqwest = { version = "0.12", features = ["gzip"], optional = true }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.145"
 tokio = { version = "1.48.0", features = ["time", "sync", "rt", "rt-multi-thread", "macros"] }
 tower = "0.5"

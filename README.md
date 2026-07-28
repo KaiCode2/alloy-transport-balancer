@@ -14,6 +14,10 @@ Load-balanced, batching RPC transport for [alloy](https://github.com/alloy-rs/al
   connection, and timeout errors
 - **Heterogeneous endpoint limits** — route by request-body capability and
   bound in-flight work independently per provider
+- **Source-aware routing** — stable endpoint IDs let follow-up reads prefer the
+  provider that announced new state
+- **Flashblocks leases** — a single `flashblocks` marker enables pinned
+  subscription/pending-state sessions without enumerating RPC methods
 - **Cross-thread domain throttling** — a 429 from any thread causes all threads targeting that domain to back off
 - **HTTP/2 client pooling** — one `reqwest::Client` per domain with connection reuse and multiplexing
 - **Transparent request batching** — concurrent individual requests are automatically grouped into JSON-RPC batch calls
@@ -77,6 +81,46 @@ HTTP `413 Payload Too Large` is retryable so an endpoint whose advertised cap
 was optimistic can fail over to a larger peer. Request gzip is not implied by
 `HttpClientConfig::gzip`: that option negotiates compressed responses, while
 JSON-RPC request bodies still count at their serialized size.
+
+### Provider Affinity and Flashblocks
+
+Give endpoints stable, non-secret IDs when event provenance or provider-local
+pending state matters. `flashblocks` is intentionally one boolean: the chain
+adapter decides whether Base uses native `newFlashblocks` plus `pendingLogs`, or
+OP uses its documented pending-state surface.
+
+```rust
+use alloy_transport_balancer::{EndpointConfig, LoadBalancedTransport, Weight};
+use reqwest::Url;
+
+let transport = LoadBalancedTransport::builder_with_endpoints(vec![
+    EndpointConfig::new(
+        Url::parse("https://flashblocks.example.com").unwrap(),
+        Weight(100),
+    )
+    .with_id("flashblocks-primary")
+    .with_flashblocks(true),
+    EndpointConfig::new(
+        Url::parse("https://fallback.example.com").unwrap(),
+        Weight(50),
+    )
+    .with_id("fallback"),
+])
+.build();
+
+// Subscriptions and preconfirmed reads never cross provider-local pending state.
+let lease = transport.flashblocks_lease("flashblocks-primary").unwrap();
+
+// Canonical follow-up reads try the announcing provider first, then fail over.
+let follow_up = transport
+    .prefer_endpoint(lease.endpoint_id().clone())
+    .unwrap();
+# let _ = (lease, follow_up);
+```
+
+IDs should be operator labels, never URLs or credentials. A Flashblocks endpoint
+must have an ID; duplicate IDs and capability declarations without IDs are
+rejected by the builder.
 
 ### Builder Pattern
 
@@ -252,9 +296,11 @@ replace them with your own endpoints before measuring production behavior.
 | Field | Default | Description |
 |-------|---------|-------------|
 | `url` | required | RPC endpoint URL |
+| `id` | none | Stable non-secret identity used for event provenance and affinity |
 | `weight` | required | Relative weighted round-robin share |
 | `max_request_bytes` | unrestricted | Largest serialized `RequestPacket` eligible for this endpoint |
 | `max_in_flight` | unrestricted | Per-endpoint semaphore bound; excess work waits without blocking other endpoints |
+| `flashblocks` | `false` | Whether the endpoint exposes a complete Flashblocks feed and matching pending state |
 
 ### `BatchingConfig`
 
