@@ -1,8 +1,8 @@
 [package]
 name = "alloy-transport-balancer"
-version = "0.3.0-alpha.1"
+version = "0.3.0-alpha.2"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.90"
 description = "Load-balanced, batching RPC transport for alloy with cross-thread domain throttling and HTTP/2 multiplexing"
 license = "MIT"
 keywords = ["alloy", "ethereum", "rpc", "load-balancer", "transport"]

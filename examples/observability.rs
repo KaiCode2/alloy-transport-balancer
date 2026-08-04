@@ -57,6 +57,6 @@ fn main() {
 
     // Option 3: Worst-case delay for adaptive concurrency control.
     let worst = max_domain_backoff();
-    println!("\nWorst-case domain backoff: {:?}", worst);
+    println!("\nWorst-case domain backoff: {worst:?}");
     println!("(Useful for reducing batch concurrency when providers are under pressure)");
 }

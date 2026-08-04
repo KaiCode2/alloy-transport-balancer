@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0-alpha.2] - 2026-07-30
+
+### Added
+
+- Added shared runtime Flashblocks qualification state, cumulative probe
+  counters, recoverable ineligibility, and `qualified_flashblocks_lease` so a
+  config declaration cannot be mistaken for a measured live capability.
+- Added `EndpointConfig::with_max_requests_per_second` with strict rolling-window
+  admission, proactive cross-provider rollover, batch-member accounting, and
+  shared state across clones and provider-affinity leases.
+- Added `endpoint_request_rate_snapshot` for safe per-endpoint capacity and
+  cumulative admission, rollover, and wait metrics without exposing RPC URLs.
+
+### Changed
+
+- Raised the minimum supported Rust version to 1.90 and updated the locked
+  `ruint` dependency to the release that resolves `RUSTSEC-2026-0220`.
+- Clarified that the single `flashblocks` endpoint marker covers the complete
+  provider-local feed: Base's native `newFlashblocks`/`pendingLogs` lanes and
+  OP's bounded pending-state sampler remain chain-adapter concerns without
+  transport-level capability enumeration.
+
 ## [0.3.0-alpha.1] - 2026-07-28
 
 ### Added
@@ -84,7 +106,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Weight` newtype for type-safe endpoint weighting (default: 100)
 - `balancer` and `batching` feature flags for selective compilation
 
-[Unreleased]: https://github.com/KaiCode2/alloy-transport-balancer/compare/v0.3.0-alpha.1...HEAD
+[Unreleased]: https://github.com/KaiCode2/alloy-transport-balancer/compare/v0.3.0-alpha.2...HEAD
+[0.3.0-alpha.2]: https://github.com/KaiCode2/alloy-transport-balancer/compare/v0.3.0-alpha.1...v0.3.0-alpha.2
 [0.3.0-alpha.1]: https://github.com/KaiCode2/alloy-transport-balancer/compare/v0.2.0...v0.3.0-alpha.1
 [0.2.0]: https://github.com/KaiCode2/alloy-transport-balancer/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/KaiCode2/alloy-transport-balancer/compare/v0.1.1...v0.1.2
