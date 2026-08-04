@@ -15,16 +15,29 @@ not publish, tag, or push without explicit authorization.
 
 ```bash
 cargo fmt --all -- --check
-cargo test --all-features
-cargo clippy --all-targets --all-features -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
+cargo test --locked --all-features
+cargo clippy --locked --all-targets --all-features --no-deps -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --all-features --no-deps
+cargo check --locked --no-default-features
+cargo check --locked --no-default-features --features balancer
+cargo check --locked --no-default-features --features batching
+cargo check --locked --no-default-features --features balancer,batching
+cargo build --locked --examples --all-features
 cargo +1.90.0 check --locked --all-features
+cargo bench --locked --no-run --all-features
+bash scripts/check-authoring-hygiene.sh
 cargo package --locked
 cargo audit
 ```
 
+The audit currently allows only the documented unmaintained-crate warnings in
+`SECURITY.md`; it must report no vulnerability advisories. Recheck their active
+reverse-dependency paths before publication.
+
 Confirm that `CHANGELOG.md`, `Cargo.toml`, and the package archive all name the
-same version. Inspect the archive with `cargo package --list` before publishing.
+same version. Inspect the archive with `cargo package --list --locked` before
+publishing. Confirm every third-party `uses:` entry remains pinned to the full
+commit recorded in `SECURITY.md`, not a mutable tag or branch.
 
 ## Publish
 

@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Raised the minimum supported Rust version to 1.90 and updated the locked
   `ruint` dependency to the release that resolves `RUSTSEC-2026-0220`.
+- Release validation now uses the checked-in lockfile throughout, immutable CI
+  action revisions, an exact dated docs toolchain, and a release-delta
+  authoring-hygiene gate.
 - Clarified that the single `flashblocks` endpoint marker covers the complete
   provider-local feed: Base's native `newFlashblocks`/`pendingLogs` lanes and
   OP's bounded pending-state sampler remain chain-adapter concerns without
