@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-05
+
+### Changed
+
+- Promotes the current alpha transport surface: source-aware routing, qualified
+  Flashblocks leases, proactive request-rate admission, and provider capacity
+  diagnostics. Rust 1.90 is required.
+
+- Gate the batching benchmark explicitly so builds with batching disabled
+  remain valid across all targets.
+
 ## [0.3.0-alpha.2] - 2026-08-05
 
 ### Added
@@ -109,10 +120,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Weight` newtype for type-safe endpoint weighting (default: 100)
 - `balancer` and `batching` feature flags for selective compilation
 
-[Unreleased]: https://github.com/KaiCode2/alloy-transport-balancer/compare/v0.3.0-alpha.2...HEAD
+[Unreleased]: https://github.com/KaiCode2/alloy-transport-balancer/compare/v0.3.0...HEAD
 [0.3.0-alpha.2]: https://github.com/KaiCode2/alloy-transport-balancer/compare/v0.3.0-alpha.1...v0.3.0-alpha.2
 [0.3.0-alpha.1]: https://github.com/KaiCode2/alloy-transport-balancer/compare/v0.2.0...v0.3.0-alpha.1
 [0.2.0]: https://github.com/KaiCode2/alloy-transport-balancer/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/KaiCode2/alloy-transport-balancer/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/KaiCode2/alloy-transport-balancer/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/KaiCode2/alloy-transport-balancer/releases/tag/v0.1.0
+
+[0.3.0]: https://github.com/KaiCode2/alloy-transport-balancer/releases/tag/v0.3.0

@@ -1,12 +1,12 @@
 # Releasing
 
-`alloy-transport-balancer` 0.3.0-alpha.2 is the first crate published in the
-Flashblocks alpha release train. Downstream crates must use this versioned
+`alloy-transport-balancer` 0.3.0 is the first crate published in the
+coordinated stable release set. Downstream crates must use this versioned
 dependency before their packages can be verified against crates.io:
 
-1. `alloy-transport-balancer 0.3.0-alpha.2`;
-2. `evm-fork-cache 0.4.0-alpha.2`;
-3. `evm-amm-state 0.3.0-alpha.2`.
+1. `alloy-transport-balancer 0.3.0`;
+2. `evm-fork-cache 0.4.0`;
+3. `evm-amm-state 0.3.0`.
 
 No release step is automatic. Prepare and review clean commits first, and do
 not publish, tag, or push without explicit authorization.
@@ -43,9 +43,9 @@ commit recorded in `SECURITY.md`, not a mutable tag or branch.
 
 ```bash
 cargo publish --locked
-git tag -s v0.3.0-alpha.2 -m "Release alloy-transport-balancer v0.3.0-alpha.2"
-git push origin v0.3.0-alpha.2
+git tag -s v0.3.0 -m "Release alloy-transport-balancer v0.3.0"
+git push origin v0.3.0
 ```
 
-Wait for 0.3.0-alpha.2 to appear in the crates.io index before packaging or
+Wait for 0.3.0 to appear in the crates.io index before packaging or
 publishing downstream crates.
