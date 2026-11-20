@@ -7,8 +7,9 @@
 //! cargo run --example basic
 //! ```
 
-use alloy_transport_balancer::{BatchingConfig, BatchingTransport, LoadBalancedTransport, Weight};
-use reqwest::Url;
+use alloy_transport_balancer::{
+    BatchingConfig, BatchingTransport, LoadBalancedTransport, Weight, reqwest::Url,
+};
 
 fn main() {
     // Two endpoints with equal weight — traffic splits 50/50.

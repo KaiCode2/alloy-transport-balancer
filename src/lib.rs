@@ -1,6 +1,42 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![doc = include_str!("../README.md")]
 
+#[cfg(all(feature = "alloy1", feature = "alloy2"))]
+compile_error!(
+    "features `alloy1` and `alloy2` are mutually exclusive; use `default-features = false` with `alloy2`"
+);
+
+#[cfg(not(any(feature = "alloy1", feature = "alloy2")))]
+compile_error!("enable either feature `alloy1` or `alloy2`");
+
+/// Re-export of the active `alloy-json-rpc` crate (`alloy1` or `alloy2`).
+#[cfg(feature = "alloy1")]
+pub use alloy_json_rpc;
+/// Re-export of the active `alloy-json-rpc` crate (`alloy1` or `alloy2`).
+#[cfg(feature = "alloy2")]
+pub use alloy2_json_rpc as alloy_json_rpc;
+
+/// Re-export of the active `alloy-transport` crate (`alloy1` or `alloy2`).
+#[cfg(feature = "alloy1")]
+pub use alloy_transport;
+/// Re-export of the active `alloy-transport` crate (`alloy1` or `alloy2`).
+#[cfg(feature = "alloy2")]
+pub use alloy2_transport as alloy_transport;
+
+/// Re-export of the active `alloy-transport-http` crate (`alloy1` or `alloy2`).
+#[cfg(all(feature = "balancer", feature = "alloy1"))]
+pub use alloy_transport_http;
+/// Re-export of the active `alloy-transport-http` crate (`alloy1` or `alloy2`).
+#[cfg(all(feature = "balancer", feature = "alloy2"))]
+pub use alloy2_transport_http as alloy_transport_http;
+
+/// Re-export of the active `reqwest` crate matching the selected alloy major version.
+#[cfg(all(feature = "balancer", feature = "alloy1"))]
+pub use reqwest;
+/// Re-export of the active `reqwest` crate matching the selected alloy major version.
+#[cfg(all(feature = "balancer", feature = "alloy2"))]
+pub use reqwest2 as reqwest;
+
 #[cfg(feature = "batching")]
 mod batching;
 #[cfg(feature = "balancer")]

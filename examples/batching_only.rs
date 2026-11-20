@@ -8,9 +8,9 @@
 //! cargo run --example batching_only
 //! ```
 
-use alloy_transport_balancer::{BatchingConfig, BatchingTransport};
-use alloy_transport_http::Http;
-use reqwest::Url;
+use alloy_transport_balancer::{
+    BatchingConfig, BatchingTransport, alloy_transport_http::Http, reqwest, reqwest::Url,
+};
 use std::time::Duration;
 
 fn main() {

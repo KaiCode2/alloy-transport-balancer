@@ -9,9 +9,8 @@
 
 use alloy_transport_balancer::{
     LoadBalancedTransport, Weight, domain_throttle, log_throttle_summary, max_domain_backoff,
-    record_rate_limit, record_success, throttle_snapshot,
+    record_rate_limit, record_success, reqwest::Url, throttle_snapshot,
 };
-use reqwest::Url;
 
 fn main() {
     // Create a transport to register some domains in the throttle registry.

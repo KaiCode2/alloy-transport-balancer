@@ -10,8 +10,8 @@
 //! 2. Retry missing requests as a smaller batch
 //! 3. Send each remaining request individually (guaranteed 1:1)
 
-use alloy_json_rpc::{Id, RequestPacket, ResponsePacket, SerializedRequest};
-use alloy_transport::{TransportError, TransportErrorKind, TransportFut};
+use crate::alloy_json_rpc::{Id, RequestPacket, ResponsePacket, SerializedRequest};
+use crate::alloy_transport::{TransportError, TransportErrorKind, TransportFut};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, Weak},
@@ -444,7 +444,7 @@ async fn send_batch_with_retry<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_json_rpc::{RequestPacket, Response, ResponsePacket, SerializedRequest};
+    use crate::alloy_json_rpc::{self, RequestPacket, Response, ResponsePacket, SerializedRequest};
     use serde_json::value::RawValue;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

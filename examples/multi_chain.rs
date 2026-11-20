@@ -9,9 +9,9 @@
 //! ```
 
 use alloy_transport_balancer::{
-    BatchingConfig, BatchingTransport, LoadBalancedTransport, Weight, throttle_snapshot,
+    BatchingConfig, BatchingTransport, LoadBalancedTransport, Weight, reqwest::Url,
+    throttle_snapshot,
 };
-use reqwest::Url;
 
 fn main() {
     // --- Ethereum mainnet ---

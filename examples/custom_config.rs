@@ -9,8 +9,8 @@
 
 use alloy_transport_balancer::{
     BalancerConfig, EndpointConfig, HttpClientConfig, LoadBalancedTransport, ThrottleConfig, Weight,
+    reqwest::Url,
 };
-use reqwest::Url;
 use std::time::Duration;
 
 fn main() {
