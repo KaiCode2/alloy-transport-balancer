@@ -13,7 +13,13 @@ Load-balanced, batching RPC transport for [alloy](https://github.com/alloy-rs/al
 - **Automatic failover** with exponential backoff on 413/429/502/503/504,
   connection, and timeout errors
 - **Heterogeneous endpoint limits** — route by request-body capability and
-  bound in-flight work independently per provider
+  bound in-flight work and request rate independently per provider
+- **Proactive RPS rollover** — reserve JSON-RPC call capacity before dispatch
+  and use another provider before a configured ceiling is exceeded
+- **Source-aware routing** — stable endpoint IDs let follow-up reads prefer the
+  provider that announced new state
+- **Flashblocks leases** — a single `flashblocks` marker enables pinned
+  subscription/pending-state sessions without enumerating RPC methods
 - **Cross-thread domain throttling** — a 429 from any thread causes all threads targeting that domain to back off
 - **HTTP/2 client pooling** — one `reqwest::Client` per domain with connection reuse and multiplexing
 - **Transparent request batching** — concurrent individual requests are automatically grouped into JSON-RPC batch calls
@@ -32,8 +38,10 @@ let transport = LoadBalancedTransport::builder_with_endpoints(vec![
         Url::parse("https://your-primary-rpc.com").unwrap(),
         Weight(100),
     )
+    .with_id("primary")
     .with_max_request_bytes(5_000_000)
-    .with_max_in_flight(32),
+    .with_max_in_flight(32)
+    .with_max_requests_per_second(45),
     EndpointConfig::new(
         Url::parse("https://your-fallback-rpc.com").unwrap(),
         Weight(50),
@@ -69,7 +77,8 @@ let transport = LoadBalancedTransport::new(vec![
 
 Use [`EndpointConfig`] when providers have different payload or throughput
 ceilings. The transport serializes each `RequestPacket` once for eligibility,
-skips endpoints whose `max_request_bytes` is too small, and waits on the chosen
+skips endpoints whose `max_request_bytes` is too small, proactively rolls past
+endpoints without immediate request-rate capacity, and waits on the chosen
 endpoint's `max_in_flight` permit before sending. If every endpoint is too
 small, it returns a local transport error without issuing network I/O.
 
@@ -77,6 +86,89 @@ HTTP `413 Payload Too Large` is retryable so an endpoint whose advertised cap
 was optimistic can fail over to a larger peer. Request gzip is not implied by
 `HttpClientConfig::gzip`: that option negotiates compressed responses, while
 JSON-RPC request bodies still count at their serialized size.
+
+### Proactive Request-Rate Limits
+
+`with_max_requests_per_second` sets a local operating ceiling for one endpoint.
+Admission uses a strict rolling one-second window shared by all transport clones,
+preferred routes, and pinned leases derived from the same balancer. A single
+request consumes one unit; a JSON-RPC batch consumes one unit per member because
+providers commonly meter the calls inside a batch rather than its single HTTP
+POST.
+
+Balanced and preferred routes immediately try another eligible endpoint when the
+selected provider lacks capacity. A required/pinned route waits for its provider,
+and the transport also waits when every eligible endpoint is temporarily full.
+Capacity waits do not consume network retry rounds. A packet larger than an
+endpoint's entire per-second capacity skips that endpoint; if no endpoint can ever
+accept it, the transport returns a local error without network I/O.
+
+The configured number is deliberately the transport's ceiling, not an inferred
+provider plan. Configure the exact provider limit when this balancer is its only
+consumer, or leave explicit headroom when other processes share the endpoint.
+Independently constructed balancers have independent budgets; reuse clones when
+one process must coordinate a shared endpoint quota.
+
+### Provider Affinity and Flashblocks
+
+Give endpoints stable, non-secret IDs when event provenance or provider-local
+pending state matters. `flashblocks` is intentionally one boolean: the chain
+adapter owns wire compatibility. Base uses native `newFlashblocks` plus
+`pendingLogs`, while OP uses a bounded pending block/log sampler; callers do not
+enumerate subscription variants in transport configuration.
+
+```rust
+use alloy_transport_balancer::{
+    EndpointConfig, FlashblocksProbeOutcome, LoadBalancedTransport, Weight,
+};
+use reqwest::Url;
+
+let transport = LoadBalancedTransport::builder_with_endpoints(vec![
+    EndpointConfig::new(
+        Url::parse("https://flashblocks.example.com").unwrap(),
+        Weight(100),
+    )
+    .with_id("flashblocks-primary")
+    .with_flashblocks(true),
+    EndpointConfig::new(
+        Url::parse("https://fallback.example.com").unwrap(),
+        Weight(50),
+    )
+    .with_id("fallback"),
+])
+.build();
+
+// Use the declared lease while performing the live subscriber preflight.
+let lease = transport.flashblocks_lease("flashblocks-primary").unwrap();
+transport
+    .record_flashblocks_probe(
+        lease.endpoint_id().clone(),
+        FlashblocksProbeOutcome::Qualified {
+            chain_id: 8453,
+            capabilities: vec!["flashblocks".to_owned()],
+        },
+    )
+    .unwrap();
+
+// Runtime use requires the latest preflight to have qualified the endpoint.
+// The returned transport never crosses provider-local pending state.
+let lease = transport
+    .qualified_flashblocks_lease("flashblocks-primary")
+    .unwrap();
+
+// Canonical follow-up reads try the announcing provider first, then fail over.
+let follow_up = transport
+    .prefer_endpoint(lease.endpoint_id().clone())
+    .unwrap();
+# let _ = (lease, follow_up);
+```
+
+IDs should be operator labels, never URLs or credentials. A Flashblocks endpoint
+must have an ID; duplicate IDs and capability declarations without IDs are
+rejected by the builder. Qualification state and cumulative attempt/success/
+failure counters are shared across scoped clones. A failed probe makes only that
+endpoint temporarily ineligible; a later successful probe restores it without
+changing canonical balancer routing.
 
 ### Builder Pattern
 
@@ -128,6 +220,11 @@ let transport = BatchingTransport::new(inner, BatchingConfig {
 });
 ```
 
+When the inner balancer has request-rate-limited endpoints, keep
+`max_batch_size` at or below the smallest provider ceiling you want to remain
+eligible. The balancer routes each batch atomically and does not split one packet
+across providers.
+
 ### Observability
 
 Monitor throttle state across all domains:
@@ -145,6 +242,15 @@ log_throttle_summary();
 
 // Traffic-weighted delay for adaptive concurrency control
 let avg_delay = weighted_domain_backoff();
+
+// Per-endpoint proactive admission state (URLs are never exposed)
+for snap in transport.endpoint_request_rate_snapshot() {
+    metrics::gauge!(
+        "rpc_request_rate_remaining",
+        snap.remaining_in_rolling_window as f64,
+        "endpoint" => snap.endpoint_id.map_or("anonymous".to_owned(), |id| id.to_string()),
+    );
+}
 ```
 
 ## When to Use Which Feature
@@ -160,8 +266,7 @@ let avg_delay = weighted_domain_backoff();
 
 ### Benchmarks
 
-> [!NOTE]
-> **Methodology:** A mock transport simulates 50ms RPC network latency per HTTP call. The "vanilla" transport limits concurrent HTTP connections to 6 (typical for `reqwest`'s default connection pool), so requests beyond 6 must queue. `BatchingTransport` compresses all concurrent requests into a single HTTP call, eliminating the queuing bottleneck.
+> **Note — methodology:** A mock transport simulates 50ms RPC network latency per HTTP call. The "vanilla" transport limits concurrent HTTP connections to 6 (typical for `reqwest`'s default connection pool), so requests beyond 6 must queue. `BatchingTransport` compresses all concurrent requests into a single HTTP call, eliminating the queuing bottleneck.
 >
 > The mock measures transport-layer overhead only — no real network I/O. All requests are `eth_call` with minimal payloads. Results are averaged over 5 iterations per data point.
 
@@ -189,6 +294,8 @@ let avg_delay = weighted_domain_backoff();
 
 - **Endpoint selection**: O(log n) via binary search on precomputed cumulative weight array
 - **Throttle hot path**: Lock-free atomic reads (`Relaxed` ordering) — no mutex contention
+- **Request-rate admission**: Unrestricted endpoints take one `Option::None`
+  branch; configured endpoints briefly lock only their bounded rolling window
 - **Domain registry**: `RwLock` taken only for domain registration (startup); reads are concurrent
 - **Connection reduction**: `endpoints × threads` TCP connections reduced to `domains` connections via HTTP/2 multiplexing and per-domain client pooling
 - **Batch overhead**: Single requests pass through without batching overhead; batching only activates when multiple requests are pending concurrently
@@ -201,7 +308,7 @@ replace them with your own endpoints before measuring production behavior.
 | Example | Shows |
 | --- | --- |
 | [`basic`](examples/basic.rs) | Weighted balancing wrapped in transparent batching. |
-| [`custom_config`](examples/custom_config.rs) | Retry, throttle, and HTTP client tuning. |
+| [`custom_config`](examples/custom_config.rs) | Per-endpoint RPS, retry, throttle, and HTTP client tuning. |
 | [`batching_only`](examples/batching_only.rs) | Batching over a single HTTP transport. |
 | [`multi_chain`](examples/multi_chain.rs) | Independent balanced transports for multiple chains. |
 | [`observability`](examples/observability.rs) | Domain throttle snapshots and summary logging. |
@@ -252,9 +359,12 @@ replace them with your own endpoints before measuring production behavior.
 | Field | Default | Description |
 |-------|---------|-------------|
 | `url` | required | RPC endpoint URL |
+| `id` | none | Stable non-secret identity used for event provenance and affinity |
 | `weight` | required | Relative weighted round-robin share |
 | `max_request_bytes` | unrestricted | Largest serialized `RequestPacket` eligible for this endpoint |
 | `max_in_flight` | unrestricted | Per-endpoint semaphore bound; excess work waits without blocking other endpoints |
+| `max_requests_per_second` | unrestricted | JSON-RPC calls admitted in any rolling second; batch members count individually |
+| `flashblocks` | `false` | Whether the endpoint exposes a complete Flashblocks feed and matching pending state |
 
 ### `BatchingConfig`
 
@@ -278,7 +388,8 @@ replace them with your own endpoints before measuring production behavior.
 ┌──────────────────────▼──────────────────────────┐
 │ LoadBalancedTransport                            │
 │  Weighted round-robin endpoint selection         │
-│  Request-size eligibility + in-flight gates      │
+│  Request-size + rolling-rate eligibility          │
+│  Per-endpoint in-flight gates                     │
 │  Retry loop with exponential backoff             │
 │  Skips heavily-throttled endpoints               │
 └──────────────────────┬──────────────────────────┘
@@ -367,6 +478,7 @@ let config = BatchingConfig {
 - HTTP 400, 401, 403, 404 (client errors)
 - JSON-RPC errors (`{"error": {"code": -32600, ...}}`)
 - Malformed responses
+- Packets larger than every endpoint's configured one-second request capacity
 
 **When the transport gives up:**
 After `max_retry_rounds` (default: 3) full rotations through all endpoints with exponential backoff, the last error is returned. Total worst-case attempts = `endpoints × (1 + max_retry_rounds)`.

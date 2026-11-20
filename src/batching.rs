@@ -10,8 +10,8 @@
 //! 2. Retry missing requests as a smaller batch
 //! 3. Send each remaining request individually (guaranteed 1:1)
 
-use alloy_json_rpc::{Id, RequestPacket, ResponsePacket, SerializedRequest};
-use alloy_transport::{TransportError, TransportErrorKind, TransportFut};
+use crate::alloy_json_rpc::{Id, RequestPacket, ResponsePacket, SerializedRequest};
+use crate::alloy_transport::{TransportError, TransportErrorKind, TransportFut};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, Weak},
@@ -444,7 +444,7 @@ async fn send_batch_with_retry<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_json_rpc::{RequestPacket, Response, ResponsePacket, SerializedRequest};
+    use crate::alloy_json_rpc::{self, RequestPacket, Response, ResponsePacket, SerializedRequest};
     use serde_json::value::RawValue;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -697,7 +697,7 @@ mod tests {
         for i in 0..n {
             let mut t = transport.clone();
             handles.push(tokio::spawn(async move {
-                let req = make_request(&format!("eth_getStorageAt_{}", i));
+                let req = make_request(&format!("eth_getStorageAt_{i}"));
                 t.call(RequestPacket::Single(req)).await
             }));
         }
@@ -713,9 +713,7 @@ mod tests {
         let calls = call_count.load(Ordering::Relaxed);
         assert!(
             calls < n,
-            "expected fewer HTTP calls than requests, got {} calls for {} requests",
-            calls,
-            n
+            "expected fewer HTTP calls than requests, got {calls} calls for {n} requests"
         );
     }
 
@@ -777,7 +775,7 @@ mod tests {
         for i in 0..n {
             let mut t = transport.clone();
             handles.push(tokio::spawn(async move {
-                let req = make_request(&format!("eth_getStorageAt_{}", i));
+                let req = make_request(&format!("eth_getStorageAt_{i}"));
                 t.call(RequestPacket::Single(req)).await
             }));
         }
@@ -796,7 +794,7 @@ mod tests {
         assert_eq!(total, n);
         // No batch should exceed max_batch_size
         for &size in sizes.iter() {
-            assert!(size <= 10, "batch size {} exceeds max of 10", size);
+            assert!(size <= 10, "batch size {size} exceeds max of 10");
         }
     }
 
@@ -834,7 +832,7 @@ mod tests {
         for i in 0..n {
             let mut t = transport.clone();
             handles.push(tokio::spawn(async move {
-                let req = make_request(&format!("eth_getStorageAt_{}", i));
+                let req = make_request(&format!("eth_getStorageAt_{i}"));
                 t.call(RequestPacket::Single(req)).await
             }));
         }
@@ -852,8 +850,7 @@ mod tests {
         let calls = call_count.load(Ordering::Relaxed);
         assert!(
             calls >= 2,
-            "expected at least 2 calls (initial + retry), got {}",
-            calls
+            "expected at least 2 calls (initial + retry), got {calls}"
         );
     }
 
@@ -879,7 +876,7 @@ mod tests {
         for i in 0..n {
             let mut t = transport.clone();
             handles.push(tokio::spawn(async move {
-                let req = make_request(&format!("eth_getStorageAt_{}", i));
+                let req = make_request(&format!("eth_getStorageAt_{i}"));
                 t.call(RequestPacket::Single(req)).await
             }));
         }
@@ -939,8 +936,7 @@ mod tests {
         let err_msg = format!("{}", result1.unwrap_err());
         assert!(
             err_msg.contains("duplicate request ID"),
-            "expected duplicate ID error message, got: {}",
-            err_msg
+            "expected duplicate ID error message, got: {err_msg}"
         );
 
         // Second request (kept in map) should succeed

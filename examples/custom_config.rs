@@ -8,21 +8,25 @@
 //! ```
 
 use alloy_transport_balancer::{
-    BalancerConfig, HttpClientConfig, LoadBalancedTransport, ThrottleConfig, Weight,
+    BalancerConfig, EndpointConfig, HttpClientConfig, LoadBalancedTransport, ThrottleConfig, Weight,
+    reqwest::Url,
 };
-use reqwest::Url;
 use std::time::Duration;
 
 fn main() {
-    let transport = LoadBalancedTransport::builder(vec![
-        (
+    let transport = LoadBalancedTransport::builder_with_endpoints(vec![
+        EndpointConfig::new(
             Url::parse("https://eth.llamarpc.com").unwrap(),
             Weight(150), // preferred provider: 60% of traffic
-        ),
-        (
+        )
+        .with_id("primary")
+        .with_max_requests_per_second(100),
+        EndpointConfig::new(
             Url::parse("https://rpc.ankr.com/eth").unwrap(),
             Weight(100), // fallback: 40% of traffic
-        ),
+        )
+        .with_id("fallback")
+        .with_max_requests_per_second(50),
     ])
     // More aggressive retry: 5 rounds with faster initial backoff.
     .config(BalancerConfig {
@@ -48,5 +52,5 @@ fn main() {
     .build();
 
     println!("Transport created with custom configuration:");
-    println!("  {:?}", transport);
+    println!("  {transport:?}");
 }

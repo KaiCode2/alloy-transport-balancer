@@ -9,6 +9,7 @@
 //! This reduces the number of TLS handshakes and TCP connections from
 //! `endpoints x threads` to just `domains` for the entire process.
 
+use crate::reqwest;
 use std::{
     collections::HashMap,
     sync::{Arc, OnceLock, RwLock},

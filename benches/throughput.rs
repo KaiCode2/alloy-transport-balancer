@@ -1,7 +1,9 @@
 #![allow(missing_docs)]
 
-use alloy_json_rpc::{Id, RequestPacket, Response, ResponsePacket, SerializedRequest};
-use alloy_transport::{TransportError, TransportFut};
+use alloy_transport_balancer::alloy_json_rpc::{
+    self, Id, RequestPacket, Response, ResponsePacket, SerializedRequest,
+};
+use alloy_transport_balancer::alloy_transport::{TransportError, TransportFut};
 use alloy_transport_balancer::{BatchingConfig, BatchingTransport};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use serde_json::value::RawValue;
